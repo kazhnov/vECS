@@ -8,6 +8,9 @@
 #include <string.h>
 
 static uint32_t modelEnemy = 0;
+static uint32_t modelLight = 0;
+static bool chaseGoal = false;
+static float goal_position[3] = VRGB_BLACK;
 
 typedef enum EntityComponent {
     COMPONENT_CONTROLL,
@@ -15,19 +18,22 @@ typedef enum EntityComponent {
     COMPONENT_TRANSFORM,
     COMPONENT_MODEL,
     COMPONENT_LIGHT,
+    COMPONENT_COLOR,
     COMPONENT_GOAL_CHASE,
     COMPONENT_GOAL_SET,
     COMPONENT_VELOCITY,
-    
+    COMPONENT_ENVIRONMENT,
     
     COMPONENT_SIZE,
 } EntityComponent;
 
 typedef struct Entity {
     uint32_t components[(COMPONENT_SIZE + 63)/64];
+
     float position[3];
     float rotation[3];
     float scale[3];
+
     float velocity[3];
     float goal[3];
     float height;
@@ -43,8 +49,6 @@ typedef struct {
 
 Entities entities;
 Entities entitiesQueue;
-
-static float goal_position[3] = VRGB_BLACK;
 
 void GAME_EntityComponentSet(Entity* entity, EntityComponent component);
 void GAME_EntityComponentsClear(Entity* entity);
@@ -64,30 +68,44 @@ void GAME_SystemGoalSet(Entity* entity);
 void GAME_SystemGoalChase(Entity* entity);
 void GAME_SystemLight(Entity* entity);
 void GAME_SystemMove(Entity* entity);
+void GAME_SystemBackgroundColorSet(Entity* entity);
 
 void GAME_PlayerAdd(float position[], float rotation[], float height);
 void GAME_EnemyAdd(float position[], float rotation[], uint32_t model);
-void GAME_LightAdd(float position[], float color[]);
+void GAME_LightAdd(float position[], float scale[], float color[], uint32_t model);
+void GAME_BackgroundColorAdd(float color[]);
 
 int main() {
     VG_WindowOpen("ECS", (float[]){1280, 720}, 0);
     VG_VSyncSet(true);
     VG_BackgroundColorSet(VRGBA_BLACK);
     VG_LightAmbientColorSet((float[]){0.01, 0.01, 0, 1});
-    uint32_t shader = VG_ShaderLoad(VGFX_PATH"shaders/shader.vert", VGFX_PATH"shaders/shader.frag");
-    VG_ShaderUse(shader);
-    modelEnemy = VG_ModelNew(VGFX_PATH"models/bunny.obj", 0);
+    uint32_t shader_default = VG_ShaderLoad(VGFX_PATH"shaders/shader.vert", VGFX_PATH"shaders/shader.frag");
+    uint32_t shader_light   = VG_ShaderLoad(VGFX_PATH"shaders/shader.vert", VGFX_PATH"shaders/light.frag");
+    modelEnemy = VG_ModelNew(VGFX_PATH"models/bunny.obj", shader_default);
+    modelLight = VG_ModelNew(VGFX_PATH"models/teapot.obj", shader_light);
+    VG_ModelColorSet(modelLight, VRGB_YELLOW);
     GAME_EntitiesInit(&entities, 8);
     GAME_EntitiesInit(&entitiesQueue, 8);
     GAME_PlayerAdd(VRGB_BLACK, VRGB_BLACK, 0.5);
     GAME_EnemyAdd(VRGB_BLUE, VRGB_BLACK, modelEnemy);
-    GAME_LightAdd((float[]){.0, 2, 0}, VRGBA_BLUE);
+    GAME_LightAdd((float[]){.0, 2, 0}, (float[]) {0.1, 0.1, 0.1}, VRGBA_BLUE, modelLight);
+    GAME_BackgroundColorAdd((float[]){.8, .0, .0});
+    
     
     while(!VG_WindowShouldClose()) {
 	GAME_EntitiesUpdate();
+	if (VG_KeyPressed(VG_KEY_LEFT_SHIFT)) {
+	    chaseGoal = !chaseGoal;
+	}
 	VG_DrawingBegin();	
 	for (size_t i = 0; i < entities.count; i++) {
 	    Entity* entity = GAME_EntitiesPointerGet(&entities, i);
+	    if (GAME_EntityComponentGet(entity, COMPONENT_ENVIRONMENT)) {
+		if (GAME_EntityComponentGet(entity, COMPONENT_COLOR)) {
+		    GAME_SystemBackgroundColorSet(entity);
+		}
+	    }
 	    if (GAME_EntityComponentGet(entity, COMPONENT_TRANSFORM)) {
 		if (GAME_EntityComponentGet(entity, COMPONENT_CAMERA)) {
 		    GAME_SystemCameraSet(entity);
@@ -127,6 +145,7 @@ int main() {
 }
 
 void GAME_SystemModelRender(Entity* entity) {
+    VG_ModelColorSet(entity->model, entity->color);
     VG_ModelDrawAt(entity->model, entity->position, entity->scale);
 }
 
@@ -148,11 +167,15 @@ void GAME_SystemGoalSet(Entity* entity) {
 }
 
 void GAME_SystemGoalChase(Entity* entity) {
-	Entity* enemy = entity;
-	
-	//VM3_Set(enemy->velocity, player_position);
+    if (!chaseGoal) {
+	VM3_Set(entity->velocity, 0, 0, 0);
+    } else {
+	float direction[3];
+	VM3_SubtractO(goal_position, entity->position, direction);
+	VM3_Normalize(direction);
+	VM3_Copy(entity->velocity, direction);
+    }
 }
-
 
 void GAME_SystemControll(Entity* entity) {
     float dt = VG_DeltaTimeGet();
@@ -191,7 +214,7 @@ void GAME_SystemControll(Entity* entity) {
     }
 
     if (VG_KeyPressed(VG_KEY_SPACE)) {
-	GAME_EnemyAdd(entity->velocity, entity->rotation, modelEnemy);
+	GAME_EnemyAdd(entity->position, entity->rotation, modelEnemy);
     }
     
     float mouse_delta[2];
@@ -207,6 +230,11 @@ void GAME_SystemMove(Entity* entity) {
     scaled_velocity[1] += entity->velocity[1]*dt;
     scaled_velocity[2] += entity->velocity[2]*dt;
     VM3_Add(entity->position, scaled_velocity);
+}
+
+void GAME_SystemBackgroundColorSet(Entity* entity) {
+    VG_BackgroundColorSet(entity->color);
+    VG_LightAmbientColorSet(entity->color);
 }
 
 void GAME_PlayerAdd(float position[], float rotation[], float height) {
@@ -241,21 +269,39 @@ void GAME_EnemyAdd(float position[], float rotation[], uint32_t model) {
     GAME_EntityComponentSet(enemy, COMPONENT_MODEL);
     enemy->model = model;
 
+    GAME_EntityComponentSet(enemy, COMPONENT_VELOCITY);
+    VM3_Set(enemy->velocity, 0, 0, 0);
+    
     GAME_EntityComponentSet(enemy, COMPONENT_GOAL_CHASE);
 }
 
-void GAME_LightAdd(float position[], float color[]) {
-    uint32_t enemy_handle = GAME_EntitiesNew(&entitiesQueue);
-    Entity* enemy = GAME_EntitiesPointerGet(&entitiesQueue, enemy_handle);
-    GAME_EntityComponentsClear(enemy);
+void GAME_LightAdd(float position[], float scale[], float color[], uint32_t model) {
+    uint32_t light_handle = GAME_EntitiesNew(&entitiesQueue);
+    Entity* light = GAME_EntitiesPointerGet(&entitiesQueue, light_handle);
+    GAME_EntityComponentsClear(light);
     
-    GAME_EntityComponentSet(enemy, COMPONENT_TRANSFORM);
-    VM3_Copy(enemy->position, position);
-    VM3_Copy(enemy->rotation, VRGB_BLACK);
-    VM3_Copy(enemy->scale, VRGB_WHITE);
+    GAME_EntityComponentSet(light, COMPONENT_TRANSFORM);
+    VM3_Copy(light->position, position);
+    VM3_Copy(light->rotation, VRGB_BLACK);
+    VM3_Copy(light->scale, scale);
 
-    GAME_EntityComponentSet(enemy, COMPONENT_LIGHT);
-    VM3_Copy(enemy->color, color);
+    GAME_EntityComponentSet(light, COMPONENT_MODEL);
+    light->model = model;
+
+    GAME_EntityComponentSet(light, COMPONENT_LIGHT);
+    GAME_EntityComponentSet(light, COMPONENT_COLOR);
+    VM3_Copy(light->color, color);
+}
+
+void GAME_BackgroundColorAdd(float color[]) {
+    uint32_t light_handle = GAME_EntitiesNew(&entitiesQueue);
+    Entity* light = GAME_EntitiesPointerGet(&entitiesQueue, light_handle);
+    GAME_EntityComponentsClear(light);
+
+    GAME_EntityComponentSet(light, COMPONENT_ENVIRONMENT);
+    
+    GAME_EntityComponentSet(light, COMPONENT_COLOR);
+    VM3_Copy(light->color, color);
 }
 
 void GAME_EntityComponentSet(Entity* entity, EntityComponent component) {
