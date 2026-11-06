@@ -4,6 +4,7 @@
 #define _VCOLOR_IMPLEMENTATION_
 #include "redist/vgfx/include/vmath/vmath.h"
 #include "redist/vgfx/include/vcolor/vcolor.h"
+#include "redist/vshape/vshape.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,6 +27,7 @@ typedef enum EntityComponent {
     COMPONENT_VELOCITY,
     COMPONENT_ENVIRONMENT,
     COMPONENT_SPINS,
+    COMPONENT_COLLIDES,
     
     COMPONENT_SIZE,
 } EntityComponent;
@@ -37,6 +39,8 @@ typedef struct Entity {
     float rotation[3];
     float scale[3];
 
+    VShape collision_shape;
+    
     float velocity[3];
     float goal[3];
     float height;
@@ -76,9 +80,12 @@ void GAME_SystemFlashLight(Entity* entity);
 void GAME_SystemMove(Entity* entity);
 void GAME_SystemBackgroundColorSet(Entity* entity);
 void GAME_SystemSpin(Entity* entity);
+void GAME_SystemCollide(Entity* entity);
+void GAME_SystemCollisionUpdate(Entity* entity);
 
-void GAME_PlayerAdd(float position[], float rotation[], float height);
-void GAME_EnemyAdd(float position[], float rotation[], uint32_t model);
+
+void GAME_PlayerAdd(float position[], float rotation[], f32 size[3]);
+void GAME_EnemyAdd(float position[], float rotation[], f32 size[3], uint32_t model);
 void GAME_PointLightAdd(float position[], float scale[], float color[], uint32_t model);
 void GAME_DirectLightAdd(float rotation[], float color[]);
 void GAME_FlashLightAdd(float position[], float direction[], float angle, float color[]);
@@ -88,6 +95,7 @@ void GAME_StaticAdd(f32 position[], f32 rotation[], f32 color[], u32 model);
 int main() {
     VG_WindowOpen("ECS", (float[]){1280, 720}, 0);
     VG_VSyncSet(false);
+//    VG_FPSMaxSet();
     VG_BackgroundColorSet(VRGBA_BLACK);
     u32 texture_default = VG_TextureNew("textures/default.ppm");
     u32 texture_floor = VG_TextureNew("textures/bunnies.ppm");
@@ -100,8 +108,8 @@ int main() {
     VG_ModelColorSet(modelLight, VRGB_YELLOW);
     GAME_EntitiesInit(&entities, 8);
     GAME_EntitiesInit(&entitiesQueue, 8);
-    GAME_PlayerAdd(VRGB_BLACK, VRGB_BLACK, 0.5);
-    GAME_EnemyAdd(VRGB_BLUE, VRGB_BLACK, modelEnemy);
+    GAME_PlayerAdd(VRGB_BLACK, VRGB_BLACK, (f32[3]){0.5, 0.5, 0.5});
+    GAME_EnemyAdd(VRGB_BLUE, VRGB_BLACK, VRGB_WHITE, modelEnemy);
     GAME_PointLightAdd((float[]){.0, 2, 0}, (float[]) {0.1, 0.1, 0.1}, VRGB_BLUE, modelLight);
     GAME_BackgroundColorAdd((float[]){.0, .0, .0});
     GAME_DirectLightAdd((float[]){V_PI/2, V_PI/3, 0.0}, VRGB_YELLOW);
@@ -116,7 +124,7 @@ int main() {
 	if (VG_KeyPressed(VG_KEY_LEFT_SHIFT)) {
 	    chaseGoal = !chaseGoal;
 	}
-	VG_DrawingBegin();	
+
 	for (size_t i = 0; i < entities.count; i++) {
 	    Entity* entity = GAME_EntitiesPointerGet(&entities, i);
 	    if (GAME_EntityComponentGet(entity, COMPONENT_ENVIRONMENT)) {
@@ -142,13 +150,16 @@ int main() {
 			GAME_SystemGoalChase(entity);
 		    }
 		    GAME_SystemMove(entity);
+		    if (GAME_EntityComponentGet(entity, COMPONENT_COLLIDES)) {
+			GAME_SystemCollisionUpdate(entity);
+			GAME_SystemCollide(entity);
+		    }
 		}
 		
 		if (GAME_EntityComponentGet(entity, COMPONENT_FLASH_LIGHT)) {
 		    GAME_SystemFlashLight(entity);
 		}
 
-				
 		if (GAME_EntityComponentGet(entity, COMPONENT_CAMERA)) {
 		    GAME_SystemCameraSet(entity);
 		}
@@ -160,14 +171,16 @@ int main() {
 		if (GAME_EntityComponentGet(entity, COMPONENT_GOAL_SET)) {
 		    GAME_SystemGoalSet(entity);
 		}
-
-		if (GAME_EntityComponentGet(entity, COMPONENT_MODEL)) {
-		    GAME_SystemModelRender(entity);
-		}
 	    }
-	    
 	}
 
+	VG_DrawingBegin();	
+	for (int i = 0; i < entities.count; i++) {
+	    Entity* entity = GAME_EntitiesPointerGet(&entities, i);
+       	    if (GAME_EntityComponentGet(entity, COMPONENT_MODEL)) {
+		GAME_SystemModelRender(entity);
+	    }
+	}
 	VG_DrawingEnd();
     }
 
@@ -181,6 +194,23 @@ void GAME_SystemSpin(Entity* entity) {
     f64 dt = VG_DeltaTimeGet();
     entity->rotation[1] += dt;
 }
+
+void GAME_SystemCollide(Entity* entity) {
+    for (int i = 0; i < entities.count; i++) {
+	Entity* other = GAME_EntitiesPointerGet(&entities, i);
+	if (other == entity) continue;
+	
+    }
+}
+
+void GAME_SystemCollisionUpdate(Entity* entity) {
+    VM3_Copy(entity->collision_shape.rotation, entity->rotation);
+    f32 halfsize[3];
+    VM3_ScaleO(entity->collision_shape.size, 0.5, halfsize);
+    // Set collision shape position at the half of entity height
+    VM3_AddO(entity->position, ((f32[3]){0, halfsize[1], 0}), entity->collision_shape.center);
+}
+
 
 void GAME_SystemModelRender(Entity* entity) {
     VG_ModelColorSet(entity->model, entity->color);
@@ -270,7 +300,7 @@ void GAME_SystemControll(Entity* entity) {
     }
 
     if (VG_KeyPressed(VG_KEY_SPACE)) {
-	GAME_EnemyAdd(entity->position, entity->rotation, modelEnemy);
+	GAME_EnemyAdd(entity->position, entity->rotation, VRGB_WHITE, modelEnemy);
     }
     
     float mouse_delta[2];
@@ -280,11 +310,12 @@ void GAME_SystemControll(Entity* entity) {
 }
 
 void GAME_SystemMove(Entity* entity) {
+    if (!VM3_Length(entity->velocity)) return;
     float dt = VG_DeltaTimeGet();
     float scaled_velocity[3];
-    scaled_velocity[0] += entity->velocity[0]*dt;
-    scaled_velocity[1] += entity->velocity[1]*dt;
-    scaled_velocity[2] += entity->velocity[2]*dt;
+    scaled_velocity[0] = entity->velocity[0]*dt;
+    scaled_velocity[1] = entity->velocity[1]*dt;
+    scaled_velocity[2] = entity->velocity[2]*dt;
     VM3_Add(entity->position, scaled_velocity);
 }
 
@@ -292,7 +323,7 @@ void GAME_SystemBackgroundColorSet(Entity* entity) {
     VG_BackgroundColorSet(entity->color);
 }
 
-void GAME_PlayerAdd(float position[], float rotation[], float height) {
+void GAME_PlayerAdd(float position[], float rotation[], float size[]) {
     uint32_t player_handle = GAME_EntitiesNew(&entitiesQueue);
     Entity* player = GAME_EntitiesPointerGet(&entitiesQueue, player_handle);
     GAME_EntityComponentsClear(player);
@@ -305,22 +336,25 @@ void GAME_PlayerAdd(float position[], float rotation[], float height) {
     GAME_EntityComponentSet(player, COMPONENT_CONTROLL);
     GAME_EntityComponentSet(player, COMPONENT_CAMERA);
     GAME_EntityComponentSet(player, COMPONENT_GOAL_SET);
-    player->height = height;
+    player->height = size[1];
 
     GAME_EntityComponentSet(player, COMPONENT_VELOCITY);
     VM3_Set(player->velocity, 0, 0, 0);
 
     GAME_EntityComponentSet(player, COMPONENT_COLOR);
     VM3_Set(player->color, 1, 1, 1);
+
+    GAME_EntityComponentSet(player, COMPONENT_COLLIDES);
+    player->collision_shape = VSHAPE_AABBCreate(position, size);
     
     GAME_EntityComponentSet(player, COMPONENT_FLASH_LIGHT);
     player->light = VG_FlashLightCreate();
     FlashLight* light = VG_FlashLightGet(player->light);
-    light->angle = V_PI/6;
-    light->cutoff = 0.01;
+    light->angle = V_PI/9;
+    light->cutoff = V_PI/12;
 }
 
-void GAME_EnemyAdd(float position[], float rotation[], uint32_t model) {
+void GAME_EnemyAdd(float position[], float rotation[], float size[], uint32_t model) {
     uint32_t enemy_handle = GAME_EntitiesNew(&entitiesQueue);
     Entity* enemy = GAME_EntitiesPointerGet(&entitiesQueue, enemy_handle);
     GAME_EntityComponentsClear(enemy);
@@ -335,6 +369,9 @@ void GAME_EnemyAdd(float position[], float rotation[], uint32_t model) {
 
     GAME_EntityComponentSet(enemy, COMPONENT_VELOCITY);
     VM3_Set(enemy->velocity, 0, 0, 0);
+
+    GAME_EntityComponentSet(enemy, COMPONENT_COLLIDES);
+    enemy->collision_shape = VSHAPE_AABBCreate(position, size);
     
     GAME_EntityComponentSet(enemy, COMPONENT_GOAL_CHASE);
 }

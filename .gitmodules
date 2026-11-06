@@ -1,3 +1,6 @@
 [submodule "redist/vgfx"]
 	path = redist/vgfx
 	url = https://github.com/kazhnov/vgfx
+[submodule "redist/vshape"]
+	path = redist/vshape
+	url = https://github.com/kazhnov/vshape
